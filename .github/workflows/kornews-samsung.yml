@@ -28,4 +28,4 @@ jobs:
 
       - name: 🚀 Run MK News Scraper
         run: |
-          python main.py
+          python kornews_samsung.py
