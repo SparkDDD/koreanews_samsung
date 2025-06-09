@@ -3,120 +3,114 @@ from bs4 import BeautifulSoup
 import urllib.parse
 import time
 import os
+from datetime import datetime
 from pyairtable import Api
 from pyairtable.formulas import match
-from datetime import datetime
-import sys
-
-print("🐍 Script started once. argv:", sys.argv)
+from deep_translator import GoogleTranslator
 
 # Airtable configuration
 AIRTABLE_API_KEY = os.environ["AIRTABLE_API_KEY"]
-BASE_ID = "app4m1JPbIkIoGYHd"
-TABLE_ID = "tblZEuzZNvyoapOLv"
+AIRTABLE_BASE_ID = "app4m1JPbIkIoGYHd"
+AIRTABLE_TABLE_ID = "tblZEuzZNvyoapOLv"
 
-FIELD_IDS = {
+FIELD_MAP = {
     "Title": "fldeICSiWka4SiwCF",
-    "ArticleURL": "flda4q2UUI2Kj3Nnd",
-    "ImageURL": "fld08fxem8U4UgWnu",
     "Category": "fldxObNcZ9LtcJEAj",
     "Summary": "fldhAsFalreKdeBsQ",
-    "PublishedDate": "fldUfT83CSpUeA3ir",
+    "Date": "fldUfT83CSpUeA3ir",
+    "Article URL": "flda4q2UUI2Kj3Nnd",
+    "ImageFile URL": "fld08fxem8U4UgWnu",
+    "Title_Eng": "fldRfFYXbGmSAgqfX",
+    "Category_Eng": "fldl2oGg6rB4CKHBr",
+    "Summary_Eng": "fldbBvQK2vtMCeMAm",
     "UniqueID": "fldLfdJUsZxVuOzjn"
 }
 
 api = Api(AIRTABLE_API_KEY)
-table = api.table(BASE_ID, TABLE_ID)
+table = api.table(AIRTABLE_BASE_ID, AIRTABLE_TABLE_ID)
 
+def get_existing_unique_ids():
+    """Fetch UniqueID values already in Airtable to avoid duplicates."""
+    existing = set()
+    field_id = FIELD_MAP["UniqueID"]
+    for record in table.all(fields=[field_id]):
+        val = record["fields"].get(field_id)
+        if val:
+            existing.add(val)
+    return existing
 
-def parse_fallback_date(raw_text: str) -> str:
-    """Convert '06.08\n2025' to '2025-06-08'"""
+def parse_date_from_time_area(time_text: str) -> str:
+    """Convert MK time_area text (e.g. 06.09<br>2025) into YYYY-MM-DD."""
     try:
-        lines = raw_text.strip().split("\n")
-        if len(lines) == 2:
-            mmdd = lines[0].strip()     # "06.08"
-            yyyy = lines[1].strip()     # "2025"
-            return datetime.strptime(f"{yyyy}.{mmdd}", "%Y.%m.%d").date().isoformat()
-        return None
+        parts = time_text.replace("<br>", " ").split()
+        if len(parts) == 2:
+            mmdd, yyyy = parts
+            date_str = f"{yyyy}-{mmdd.replace('.', '-')}"
+            return datetime.strptime(date_str, "%Y-%m-%d").date().isoformat()
     except Exception as e:
-        print(f"❌ Date parse error: {e} | raw: {raw_text}")
+        print("❌ Failed to parse date:", e)
+    return None
+
+def translate_text(text):
+    try:
+        return GoogleTranslator(source='ko', target='en').translate(text)
+    except Exception as e:
+        print(f"⚠️ Translation failed: {e}")
         return None
 
+def scrape_and_upload():
+    url = "https://www.mk.co.kr/search?word=%EC%82%BC%EC%84%B1%EC%A0%84%EC%9E%90"
+    headers = {"User-Agent": "Mozilla/5.0"}
+    res = requests.get(url, headers=headers)
+    soup = BeautifulSoup(res.text, "html.parser")
+    articles = soup.select("li.news_node")
 
-def article_exists(unique_id):
-    formula = match({FIELD_IDS["UniqueID"]: unique_id})
-    records = table.all(formula=formula)
-    return len(records) > 0
+    existing_ids = get_existing_unique_ids()
+    print(f"🔁 Loaded {len(existing_ids)} existing unique IDs")
 
+    for article in articles:
+        title_tag = article.select_one("h3.news_ttl")
+        link_tag = article.find("a")
+        image_tag = article.select_one(".thumb_area img")
+        category_tag = article.select_one(".cate")
+        summary_tag = article.select_one(".news_desc")
+        time_tag = article.select_one(".time_area span")
 
-def upload_to_airtable(article):
-    if article_exists(article["id"]):
-        print(f"⚠️ Already exists, skipping: {article['id']}")
-        return
-
-    record = {
-        FIELD_IDS["Title"]: article["title"],
-        FIELD_IDS["ArticleURL"]: article["link"],
-        FIELD_IDS["ImageURL"]: article["image_url"],
-        FIELD_IDS["Category"]: article["category"],
-        FIELD_IDS["Summary"]: article["summary"],
-        FIELD_IDS["PublishedDate"]: article["published_time"],
-        FIELD_IDS["UniqueID"]: article["id"]
-    }
-
-    table.create(record)
-    print(f"✅ Uploaded: {article['title']}")
-
-
-def search_mk(keyword: str, max_pages: int = 3):
-    base_url = "https://www.mk.co.kr/search"
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
-    results = []
-
-    for page in range(1, max_pages + 1):
-        params = {"page": page, "word": keyword}
-        encoded_params = urllib.parse.urlencode(params)
-        url = f"{base_url}?{encoded_params}"
-
-        print(f"📄 Fetching: {url}")
-        res = requests.get(url, headers=headers)
-        if res.status_code != 200:
-            print(f"❌ Failed to fetch page {page}")
+        if not (title_tag and link_tag):
             continue
 
-        soup = BeautifulSoup(res.text, "html.parser")
-        articles = soup.select("li.news_node")
+        article_url = link_tag["href"]
+        if article_url in existing_ids:
+            print(f"⚠️ Skipping duplicate: {article_url}")
+            continue
 
-        for article in articles:
-            title_tag = article.select_one("h3.news_ttl")
-            link_tag = article.find("a")
-            image_tag = article.select_one(".thumb_area img")
-            category_tag = article.select_one(".cate")
-            summary_tag = article.select_one(".news_desc")
-            time_tag = article.select_one(".time_area span")
+        title = title_tag.get_text(strip=True)
+        category = category_tag.get_text(strip=True) if category_tag else None
+        summary = summary_tag.get_text(strip=True) if summary_tag else None
+        date_text = str(time_tag).split(">")[1].split("<")[0] + " " + str(time_tag).split(">")[2].split("<")[0] if time_tag else None
+        published_date = parse_date_from_time_area(date_text) if date_text else None
+        image_url = image_tag.get("data-src") if image_tag else None
 
-            if title_tag and link_tag and time_tag:
-                article_url = link_tag["href"]
-                image_url = image_tag.get("data-src") if image_tag else None
-                published_date = parse_fallback_date(time_tag.get_text())
+        # Translate
+        title_en = translate_text(title)
+        category_en = translate_text(category) if category else None
+        summary_en = translate_text(summary) if summary else None
 
-                results.append({
-                    "id": article_url,
-                    "title": title_tag.get_text(strip=True),
-                    "link": article_url,
-                    "image_url": image_url,
-                    "category": category_tag.get_text(strip=True) if category_tag else None,
-                    "summary": summary_tag.get_text(strip=True) if summary_tag else None,
-                    "published_time": published_date
-                })
+        fields = {
+            FIELD_MAP["Title"]: title,
+            FIELD_MAP["Category"]: category,
+            FIELD_MAP["Summary"]: summary,
+            FIELD_MAP["Date"]: published_date,
+            FIELD_MAP["Article URL"]: article_url,
+            FIELD_MAP["ImageFile URL"]: image_url,
+            FIELD_MAP["UniqueID"]: article_url,
+            FIELD_MAP["Title_Eng"]: title_en,
+            FIELD_MAP["Category_Eng"]: category_en,
+            FIELD_MAP["Summary_Eng"]: summary_en,
+        }
 
-        time.sleep(1)
-
-    return results
-
+        table.create(fields)
+        print(f"✅ Uploaded: {title}")
 
 if __name__ == "__main__":
-    keyword = "삼성전자"
-    articles = search_mk(keyword, max_pages=3)
-    for article in articles:
-        upload_to_airtable(article)
+    scrape_and_upload()
