@@ -6,10 +6,9 @@ import os
 from pyairtable import Api
 from pyairtable.formulas import match
 from datetime import datetime
-
 import sys
-print("🐍 Script started once. argv:", sys.argv)
 
+print("🐍 Script started once. argv:", sys.argv)
 
 # Airtable configuration
 AIRTABLE_API_KEY = os.environ["AIRTABLE_API_KEY"]
@@ -30,24 +29,27 @@ api = Api(AIRTABLE_API_KEY)
 table = api.table(BASE_ID, TABLE_ID)
 
 
-def parse_date(mk_date: str) -> str:
-    """Convert MK datetime string to ISO date (YYYY-MM-DD)"""
+def parse_fallback_date(raw_text: str) -> str:
+    """Convert '06.08\n2025' to '2025-06-08'"""
     try:
-        dt = datetime.strptime(mk_date.strip(), "%Y.%m.%d %H:%M:%S")
-        return dt.date().isoformat()  # e.g. "2025-06-09"
-    except Exception:
+        lines = raw_text.strip().split("\n")
+        if len(lines) == 2:
+            mmdd = lines[0].strip()     # "06.08"
+            yyyy = lines[1].strip()     # "2025"
+            return datetime.strptime(f"{yyyy}.{mmdd}", "%Y.%m.%d").date().isoformat()
+        return None
+    except Exception as e:
+        print(f"❌ Date parse error: {e} | raw: {raw_text}")
         return None
 
 
 def article_exists(unique_id):
-    """Check if an article already exists in Airtable using UniqueID (URL)"""
     formula = match({FIELD_IDS["UniqueID"]: unique_id})
     records = table.all(formula=formula)
     return len(records) > 0
 
 
 def upload_to_airtable(article):
-    """Upload one article to Airtable, if not already uploaded"""
     if article_exists(article["id"]):
         print(f"⚠️ Already exists, skipping: {article['id']}")
         return
@@ -69,7 +71,6 @@ def upload_to_airtable(article):
 def search_mk(keyword: str, max_pages: int = 3):
     base_url = "https://www.mk.co.kr/search"
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
-
     results = []
 
     for page in range(1, max_pages + 1):
@@ -92,30 +93,24 @@ def search_mk(keyword: str, max_pages: int = 3):
             image_tag = article.select_one(".thumb_area img")
             category_tag = article.select_one(".cate")
             summary_tag = article.select_one(".news_desc")
-            time_tag = article.select_one(".time_info")
+            time_tag = article.select_one(".time_area span")
 
-            if title_tag and link_tag:
+            if title_tag and link_tag and time_tag:
                 article_url = link_tag["href"]
                 image_url = image_tag.get("data-src") if image_tag else None
+                published_date = parse_fallback_date(time_tag.get_text())
+
                 results.append({
-                    "id":
-                    article_url,
-                    "title":
-                    title_tag.get_text(strip=True),
-                    "link":
-                    article_url,
-                    "image_url":
-                    image_url,
-                    "category":
-                    category_tag.get_text(
-                        strip=True) if category_tag else None,
-                    "summary":
-                    summary_tag.get_text(strip=True) if summary_tag else None,
-                    "published_time":
-                    parse_date(time_tag.get_text()) if time_tag else None
+                    "id": article_url,
+                    "title": title_tag.get_text(strip=True),
+                    "link": article_url,
+                    "image_url": image_url,
+                    "category": category_tag.get_text(strip=True) if category_tag else None,
+                    "summary": summary_tag.get_text(strip=True) if summary_tag else None,
+                    "published_time": published_date
                 })
 
-        time.sleep(1)  # polite crawling
+        time.sleep(1)
 
     return results
 
@@ -125,4 +120,3 @@ if __name__ == "__main__":
     articles = search_mk(keyword, max_pages=3)
     for article in articles:
         upload_to_airtable(article)
-
